@@ -1,0 +1,9 @@
+[package]
+name = "rub"
+version = "0.1.0"
+authors = ["Evan Simmons <evan.simmons@creditkarma.com>"]
+
+[dependencies]
+reqwest = "0.8.5"
+clap = "2.30.0"
+rayon = "1.0.0"
