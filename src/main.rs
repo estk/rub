@@ -65,7 +65,7 @@ fn parse_args() -> Result<Config, Box<Error>> {
         None => return Err("No url provided".into()),
     };
     let number = value_t!(matches, "number", u32).unwrap_or(100);
-    let concurrency = value_t!(matches, "concurrency", u32).unwrap_or(10);
+    let concurrency = value_t!(matches, "concurrency", u16).unwrap_or(10);
     Ok(Config {
         url,
         number,

@@ -7,3 +7,7 @@ authors = ["Evan Simmons <evan.simmons@creditkarma.com>"]
 reqwest = "0.8.5"
 clap = "2.30.0"
 rayon = "1.0.0"
+futures = "0.1.18"
+hyper = "0.11.21"
+tokio-core = "0.1.12"
+hyper-tls = "0.1.2"
