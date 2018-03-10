@@ -12,6 +12,7 @@ use hyper::Client;
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
 use tokio_core::reactor::Core;
+use tokio_core::reactor::Remote;
 
 #[derive(Debug)]
 pub struct Config {
@@ -28,7 +29,7 @@ pub fn run(config: Config) -> Result<(), Box<Error>> {
     let mut core = Core::new()?;
     let handle = core.handle();
 
-    let url = &config.url;
+    let uri = config.url.parse()?;
     let concurrency = config.concurrency;
     let number = config.number;
 
@@ -38,80 +39,60 @@ pub fn run(config: Config) -> Result<(), Box<Error>> {
 
     println!("running core");
 
-    for (0..conc) {
-        handle.spawn(|_| {
-            client.get(url)
-        })
-    }
+    let (tx, rx) = mpsc::channel(1);
 
-    let results = core.run(new Rubber())?;
+    for _ in 0..concurrency {
+        handle.spawn(|_| client.get(uri).then(|res| tx.send(res)))
+    }
+    let rubber = Rubber {
+        uri,
+        resultsTx: tx,
+        resultsRx: rx,
+        remote: core.remote(),
+        client,
+        running: 0,
+        number: number,
+        finished: 0,
+        results: vec![],
+    };
+
+    let results = core.run(rubber)?;
 
     println!("finished running");
-
-    let successes: u32 = results
-        .into_iter()
-        .map(|x| match x {
-            200 => 1,
-            _ => 0,
-        })
-        .sum();
-    println!("successes {}", successes);
     Ok(())
 }
-// #[derive(Debug)]
+
 struct Rubber {
-    url: String,
-    resultsRx: mpsc::Receiver<Result<hyper::Response<()>, hyper::Error>>,
+    uri: hyper::Uri,
+    resultsTx: mpsc::Sender<Result<hyper::Response<hyper::Body>, hyper::Error>>,
+    resultsRx: mpsc::Receiver<Result<hyper::Response<hyper::Body>, hyper::Error>>,
+    remote: Remote,
+    client: Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>,
     running: u16,
     number: u32,
     finished: u32,
+    results: Vec<hyper::Response<hyper::Body>>,
 }
+
 impl Future for Rubber {
-    type Item = ();
+    type Item = Vec<hyper::Response<hyper::Body>>;
     type Error = hyper::Error;
-    fn poll(&mut self) -> Result<Async<()>, hyper::Error> {
-        let res = tryready!(self.resultsRx.poll());
-        if self.running+self.finished < self.number {
-            self.remote.spawn(|_| {
-                client.get(self.url)
-            })
-        } 
+    fn poll(&mut self) -> Result<Async<Vec<hyper::Response<hyper::Body>>>, hyper::Error> {
+        loop {
+            let res = try_ready!(self.resultsRx.poll()).unwrap()?;
+            self.results.push(res);
+
+            let doneSpawning = self.running as u32 + self.finished >= self.number;
+            if !doneSpawning {
+                self.remote.spawn(|_| {
+                    self.client
+                        .get(self.uri)
+                        .then(|res| self.resultsTx.send(res))
+                })
+            }
+            if self.finished >= self.number {
+                return Ok(Async::Ready(self.results));
+            }
+        }
     }
 }
-
-
-// #[derive(Debug)]
-// struct Request {
-//     url: String,
-//     running: bool,
-//     status: u16,
-//     shared: Arc<Mutex<Shared>>,
-//     client: Client<HttpsConnector<HttpConnector>>,
-// }
-
-// impl Future for Request {
-//     type Item = ();
-//     type Error = hyper::Error;
-//     fn poll(&mut self) -> Result<Async<()>, hyper::Error> {
-//         {
-//             let mut conf = self.shared.lock().unwrap();
-//             if !self.running {
-//                 if conf.in_flight >= conf.concurrency {
-//                     // TODO: not supposed to do this
-//                     return Ok(Async::NotReady);
-//                 }
-//                 conf.in_flight += 1;
-//                 self.running = true;
-//             }
-//             println!("in_flight: {}, conc: {}", conf.in_flight, conf.concurrency);
-//         }
-//         // TODO: hangs here
-//         let res = try_ready!(self.client.get(self.url.parse()?).poll());
-//         println!("heer");
-//         let mut conf = self.shared.lock().unwrap();
-//         conf.in_flight -= 1;
-//         println!("Response: {}", res.status());
-//         conf.results.push(res.status().as_u16());
-//         Ok(Async::Ready(res))
-//     }
-// }
