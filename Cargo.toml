@@ -4,10 +4,8 @@ version = "0.1.0"
 authors = ["Evan Simmons <evan.simmons@creditkarma.com>"]
 
 [dependencies]
-reqwest = "0.8.5"
-clap = "2.30.0"
-rayon = "1.0.0"
+clap = "2.31.1"
 futures = "0.1.18"
-hyper = "0.11.21"
-tokio-core = "0.1.12"
+hyper = "0.11.22"
+tokio-core = "0.1.15"
 hyper-tls = "0.1.2"

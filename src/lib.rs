@@ -1,17 +1,20 @@
+#[macro_use]
 extern crate futures;
 extern crate hyper;
 extern crate hyper_tls;
 extern crate tokio_core;
 
+use futures::prelude::*;
 use std::sync::Arc;
 use std::cell::RefCell;
 use std::error::Error;
+use std::time::{Duration, Instant};
 use tokio_core::reactor::Core;
 use tokio_core::reactor::Remote;
-use futures::prelude::*;
 use futures::Future;
 use futures::sync::mpsc;
-use hyper::Client;
+use hyper::{Client, Response, Body};
+use hyper::client::FutureResponse;
 use hyper_tls::HttpsConnector;
 
 #[derive(Debug)]
@@ -42,7 +45,10 @@ pub fn run(config: Config) -> Result<(), Box<Error>> {
     let results = core.run(rubber)?;
     let unwrapped = Arc::try_unwrap(results).unwrap().into_inner();
 
-    let count = unwrapped.into_iter().fold(0, |acc, _| acc + 1);
+    let count = unwrapped.into_iter().fold(0, |acc, x| {
+        println!("{:?}", x);
+        acc + 1
+    });
 
     println!("finished requests: {:?}", count);
     Ok(())
@@ -78,13 +84,16 @@ impl Rubber {
             let conn = HttpsConnector::new(4, &handle).unwrap();
             let client = Client::configure().connector(conn).build(&handle);
 
-            client
-                .get(uri)
-                .then(|res| results_tx.send(res).then(|_| Ok(())))
+            RWrapper::new( client.get(uri))
+            .then(move |res| {
+                results_tx.send(res);
+                Ok(())
+            })
         });
         self.running += 1;
     }
 }
+
 
 impl Future for Rubber {
     type Item = Arc<RefCell<Results>>;
@@ -109,4 +118,30 @@ impl Future for Rubber {
             println!("finished: {:?}", self.finished);
         }
     }
+}
+
+struct RWrapper {
+    start: Option<Instant>,
+    inner: FutureResponse,
+}
+impl RWrapper {
+    fn new(inner: FutureResponse) -> RWrapper {
+        RWrapper{start: None, inner}
+    }
+}
+impl Future for RWrapper {
+    type Item = Response<Body>;
+    type Error =  hyper::Error;
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        if self.start.is_none() {
+            self.start = Some(Instant::now());
+        }
+        let v = try_ready!(self.inner.poll());
+        println!("{}", fmtDuration(self.start.unwrap().elapsed()));
+        Ok(Async::Ready(v))
+    }
+}
+
+fn fmtDuration(d: Duration) -> String {
+    format!("request duration: {:?}s {}ms", d.as_secs() * 1_000, d.subsec_nanos() as u64 / 1_000_000)
 }
