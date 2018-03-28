@@ -4,17 +4,17 @@ extern crate hyper;
 extern crate hyper_tls;
 extern crate tokio_core;
 
+use futures::Future;
 use futures::prelude::*;
-use std::sync::Arc;
+use futures::sync::mpsc;
+use hyper::client::FutureResponse;
+use hyper::{Body, Client, Response};
+use hyper_tls::HttpsConnector;
 use std::cell::RefCell;
 use std::error::Error;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use futures::Future;
-use futures::sync::mpsc;
 use tokio_core::reactor::{Core, Remote};
-use hyper::{Body, Client, Response};
-use hyper::client::FutureResponse;
-use hyper_tls::HttpsConnector;
 
 #[derive(Debug)]
 pub struct Config {
@@ -35,7 +35,6 @@ pub fn run(config: Config) -> Result<(), Box<Error>> {
     println!("running core");
     let core_results = core.run(rubber)?;
     let results = Arc::try_unwrap(core_results).unwrap().into_inner();
-    // let results = rubber.run()?;
     let count = results.into_iter().fold(0, |acc, x| {
         println!("{:?}", x);
         acc + 1
@@ -45,11 +44,11 @@ pub fn run(config: Config) -> Result<(), Box<Error>> {
     Ok(())
 }
 
-type Results = Vec<Result<hyper::Response<hyper::Body>, hyper::Error>>;
+type Results = Vec<Result<ResponseWrapper, hyper::Error>>;
 struct Rubber {
     uri: hyper::Uri,
-    results_tx: mpsc::Sender<Result<hyper::Response<hyper::Body>, hyper::Error>>,
-    results_rx: mpsc::Receiver<Result<hyper::Response<hyper::Body>, hyper::Error>>,
+    results_tx: mpsc::Sender<Result<ResponseWrapper, hyper::Error>>,
+    results_rx: mpsc::Receiver<Result<ResponseWrapper, hyper::Error>>,
     remote: Remote,
     running: u16,
     number: u32,
@@ -90,7 +89,7 @@ impl Rubber {
             let conn = HttpsConnector::new(4, &handle).unwrap();
             let client = Client::configure().connector(conn).build(&handle);
 
-            ResponseWrapper::new(client.get(uri))
+            FutureResponseWrapper::new(client.get(uri))
                 .then(move |res| results_tx.send(res).then(|_| Ok(())))
         });
         self.running += 1;
@@ -122,15 +121,21 @@ impl Future for Rubber {
     }
 }
 
-// ResponseWrapper wraps a response with timing information
+#[derive(Debug)]
 struct ResponseWrapper {
+    duration: Duration,
+    response: Response<Body>,
+}
+
+// FutureResponseWrapper wraps a response with timing information
+struct FutureResponseWrapper {
     start: Option<Instant>,
     finish: Option<Instant>,
     inner: FutureResponse,
 }
-impl ResponseWrapper {
-    fn new(inner: FutureResponse) -> ResponseWrapper {
-        ResponseWrapper {
+impl FutureResponseWrapper {
+    fn new(inner: FutureResponse) -> FutureResponseWrapper {
+        FutureResponseWrapper {
             start: None,
             finish: None,
             inner,
@@ -143,17 +148,20 @@ impl ResponseWrapper {
         }
     }
 }
-impl Future for ResponseWrapper {
-    type Item = Response<Body>;
+impl Future for FutureResponseWrapper {
+    type Item = ResponseWrapper;
     type Error = hyper::Error;
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.start.is_none() {
             self.start = Some(Instant::now());
         }
-        let v = try_ready!(self.inner.poll());
+        let response = try_ready!(self.inner.poll());
         self.finish = Some(Instant::now());
         println!("{}", fmt_duration(self.duration().unwrap()));
-        Ok(Async::Ready(v))
+        Ok(Async::Ready(ResponseWrapper {
+            duration: self.duration().unwrap(),
+            response,
+        }))
     }
 }
 
