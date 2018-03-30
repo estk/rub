@@ -2,10 +2,10 @@
 extern crate clap;
 extern crate rub;
 
-use std::process;
+use clap::{App, Arg};
 use rub::Config;
 use std::error::Error;
-use clap::{App, Arg};
+use std::process;
 
 fn main() {
     let config = parse_args().unwrap_or_else(|err| {
@@ -18,7 +18,6 @@ fn main() {
         eprintln!("Application error {:?}", e);
         process::exit(1);
     }
-    eprintln!("done");
 }
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");

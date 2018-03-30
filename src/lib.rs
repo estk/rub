@@ -1,3 +1,5 @@
+#![feature(duration_extras)]
+
 #[macro_use]
 extern crate futures;
 extern crate hyper;
@@ -11,6 +13,7 @@ use hyper::client::FutureResponse;
 use hyper::{Body, Client, Response};
 use hyper_tls::HttpsConnector;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,7 +27,7 @@ pub struct Config {
 }
 
 pub fn run(config: Config) -> Result<(), Box<Error>> {
-    let mut core = Core::new().unwrap();
+    let core = Core::new().unwrap();
     let rubber = Rubber::new(
         core.remote(),
         config.url.parse()?,
@@ -32,16 +35,51 @@ pub fn run(config: Config) -> Result<(), Box<Error>> {
         config.concurrency,
     );
 
-    println!("running core");
-    let core_results = core.run(rubber)?;
-    let results = Arc::try_unwrap(core_results).unwrap().into_inner();
-    let count = results.into_iter().fold(0, |acc, x| {
-        println!("{:?}", x);
-        acc + 1
-    });
-
-    println!("finished requests: {:?}", count);
+    let stats = rubber.run(core)?;
+    println!("{}", stats.display());
     Ok(())
+}
+
+struct Stats {
+    slowest: Duration,
+    fastest: Duration,
+    average: Duration,
+    total: Duration,
+    count: u32,
+    errors: u32,
+    status_codes: StatusCodeMap,
+}
+impl Stats {
+    fn display(&self) -> String {
+        format!(
+            r#"
+Summary:
+    slowest: {}
+    fastest: {}
+    average: {}
+    total:   {}
+    requsts: {}
+    errors:  {}
+Status Codes:
+{}
+        "#,
+            display(self.slowest),
+            display(self.fastest),
+            display(self.average),
+            display(self.total),
+            self.count,
+            self.errors,
+            display_map(&self.status_codes),
+        )
+    }
+}
+
+fn display_map(m: &StatusCodeMap) -> String {
+    let mut s = String::new();
+    for (k, v) in m {
+        s += &format!("    {}: {}\n", k, v);
+    }
+    s
 }
 
 type Results = Vec<Result<ResponseWrapper, hyper::Error>>;
@@ -56,8 +94,10 @@ struct Rubber {
     results: Arc<RefCell<Results>>,
     concurrency: u16,
 }
+
+type StatusCodeMap = HashMap<hyper::StatusCode, u32>;
 impl Rubber {
-    fn new(remote: Remote, uri: hyper::Uri, number: u32, concurrency: u16) -> Rubber {
+    pub fn new(remote: Remote, uri: hyper::Uri, number: u32, concurrency: u16) -> Rubber {
         let (results_tx, results_rx) = mpsc::channel(1);
         let results = Arc::new(RefCell::new(vec![]));
 
@@ -72,6 +112,47 @@ impl Rubber {
             running: 0,
             finished: 0,
         }
+    }
+    pub fn run(self, mut core: Core) -> Result<Stats, Box<Error>> {
+        let core_results = core.run(self)?;
+        let results = Arc::try_unwrap(core_results).unwrap().into_inner();
+
+        let mut count = 0;
+        let mut errors = 0;
+        let mut total = Duration::new(0, 0);
+        let mut slowest = Duration::new(0, 0);
+        let mut fastest = Duration::new(u64::max_value(), 0);
+        let mut status_codes = StatusCodeMap::new();
+
+        for r in results.into_iter() {
+            match r {
+                Err(_) => errors += 1,
+                Ok(res) => {
+                    let d = res.duration;
+                    count += 1;
+                    total += d;
+                    if d > slowest {
+                        slowest = d;
+                    }
+                    if d < fastest {
+                        fastest = d;
+                    }
+
+                    let status = res.response.status();
+                    let entry = status_codes.entry(status);
+                    entry.and_modify(|e| *e += 1).or_insert(1);
+                }
+            }
+        }
+        Ok(Stats {
+            count,
+            errors,
+            total,
+            slowest,
+            fastest,
+            average: total / count,
+            status_codes,
+        })
     }
     fn spawn_requests(&mut self) {
         let done_spawning = self.running as u32 + self.finished >= self.number;
@@ -116,7 +197,6 @@ impl Future for Rubber {
             self.finished += 1;
 
             self.results.borrow_mut().push(res);
-            println!("finished: {:?}", self.finished);
         }
     }
 }
@@ -157,7 +237,7 @@ impl Future for FutureResponseWrapper {
         }
         let response = try_ready!(self.inner.poll());
         self.finish = Some(Instant::now());
-        println!("{}", fmt_duration(self.duration().unwrap()));
+        // println!("{}", fmt_duration(self.duration().unwrap()));
         Ok(Async::Ready(ResponseWrapper {
             duration: self.duration().unwrap(),
             response,
@@ -166,11 +246,9 @@ impl Future for FutureResponseWrapper {
 }
 
 // Helpers
-
-fn fmt_duration(d: Duration) -> String {
+fn display(d: Duration) -> String {
     format!(
-        "request duration: {:?}s {}ms",
-        d.as_secs() * 1_000,
-        d.subsec_nanos() as u64 / 1_000_000
+        "{}ms",
+        (d.as_secs() * 1_000 + d.subsec_nanos() as u64 / 1_000_000)
     )
 }
